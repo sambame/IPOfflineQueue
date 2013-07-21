@@ -5,6 +5,7 @@
 #import "FMDatabasePool.h"
 #import "FMDatabaseQueue.h"
 #import "Reachability.h"
+#import "DDLog.h"
 
 // Log levels: off, error, warn, info, verbose
 #if DEBUG
