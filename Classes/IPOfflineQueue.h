@@ -42,7 +42,7 @@ typedef IPOfflineQueueFilterResult (^IPOfflineQueueFilterBlock)(NSDictionary *us
 
 - (void)close;
 
-- (void)stop;
+- (void)stop:(NSString *)reason;
 - (void)start;
 - (void)finishTask:(int)taskId;
 - (void)taskFailed:(int)taskId error:(NSError *)error;

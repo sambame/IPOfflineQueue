@@ -18,6 +18,8 @@ static const int ddLogLevel = LOG_LEVEL_WARN;
 
 static NSMutableSet *_activeQueues = nil;
 
+#define TABLE_NAME @"queue2"
+
 @interface IPOfflineQueue() {
     NSOperationQueue *_operationQueue;
     NSTimer *_autoResumeTimer;
@@ -36,17 +38,6 @@ static NSMutableSet *_activeQueues = nil;
 @synthesize autoResumeInterval = _autoResumeInterval;
 @synthesize name = _name;
 
-#pragma mark - SQLite utilities
-
-- (void)executeRawQuery:(NSString *)query withDB:(FMDatabase *)db{
-    BOOL ret = [db executeUpdate:query];
-
-    if (ret == FALSE) {
-        [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
-                                 reason:@"SQLITE BUSY for too long" userInfo:nil
-          ] raise];
-    }
-}
 
 #pragma mark - Initialization and schema management
 
@@ -84,7 +75,7 @@ static NSMutableSet *_activeQueues = nil;
                                                               
                                                               if (remoteHostStatus == NotReachable) {
                                                                   DDLogInfo(@"suspend queue %@ via reachability", _name);
-                                                                  [self suspended];
+                                                                  [self suspended:@"reachability"];
                                                               } else {
                                                                   DDLogInfo(@"try resume queue %@ via reachability", _name);
                                                                   [self tryAutoResume];
@@ -97,7 +88,7 @@ static NSMutableSet *_activeQueues = nil;
         _operationQueue.maxConcurrentOperationCount = 1;
         
         if (stopped) {
-            [self stop];
+            [self stop:@"inital state is stopped"];
         } else {
             [self start];
         }
@@ -176,14 +167,16 @@ static NSMutableSet *_activeQueues = nil;
     
     __block bool isNewQueue = YES;
     [self.dbQueue inDatabase:^(FMDatabase *db) {
-        FMResultSet *rs = [db executeQuery:@"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'queue'"];
+        db.logsErrors = YES;
+        
+        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '%@'", TABLE_NAME]];
         
         int existingTables = [rs next] ? [rs intForColumnIndex:0] : 0;
         [rs close];
         
         if (existingTables < 1) {
             DDLogInfo(@"[IPOfflineQueue] Creating new schema");
-            [self executeRawQuery:@"CREATE TABLE queue (params BLOB NOT NULL)" withDB:db];
+            [db executeUpdate:[NSString stringWithFormat:@"CREATE TABLE %@ (taskid INTEGER PRIMARY KEY AUTOINCREMENT, params BLOB NOT NULL)", TABLE_NAME]];
             
             [self clear:db];
         } else {
@@ -250,7 +243,7 @@ static NSMutableSet *_activeQueues = nil;
             [archiver finishEncoding];
             archiver = nil;
 
-            BOOL inserted = [db executeUpdate:@"INSERT INTO queue (params) VALUES (?)", data];
+            BOOL inserted = [db executeUpdate:[NSString stringWithFormat:@"INSERT INTO %@ (params) VALUES (?)", TABLE_NAME], data];
             
             if (inserted == FALSE) {
                 [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
@@ -273,10 +266,10 @@ static NSMutableSet *_activeQueues = nil;
     // adding a new one.
 
     [self.dbQueue inDatabase:^(FMDatabase *db) {
-        FMResultSet *rs = [db executeQuery:@"SELECT ROWID, params FROM queue ORDER BY ROWID"];
+        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY id", TABLE_NAME]];
         
         while ([rs next]) {
-            sqlite_uint64 rowid = [rs intForColumnIndex:0];
+            sqlite_uint64 taskid = [rs intForColumnIndex:0];
             NSData *blobData = [rs dataForColumnIndex:1];
             
             NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingWithData:blobData];
@@ -285,7 +278,7 @@ static NSMutableSet *_activeQueues = nil;
             unarchiver = nil;
             
             if (filterBlock(userInfo) == IPOfflineQueueFilterResultAttemptToDelete) {
-                [db executeUpdate:@"DELETE FROM queue WHERE ROWID = ?", rowid];                
+                [db executeUpdate:[NSString stringWithFormat:@"DELETE FROM ? WHERE taskid = %@", TABLE_NAME], taskid];
             }
         }
         
@@ -295,29 +288,32 @@ static NSMutableSet *_activeQueues = nil;
 
 - (void)clear:(FMDatabase*)db {
     [self backgroundTaskBlock:^{
-        [self executeRawQuery:@"DELETE FROM queue" withDB:db];
         [_operationQueue cancelAllOperations];
+        [self.dbQueue inDatabase:^(FMDatabase *db) {
+            [db executeUpdate:[NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME]];
+        }];
     }];
 }
 
 - (void)waitForRetry {
-    DDLogError(@"Last task of %@failed waiting for retry", _name);
+    NSString *reason = [NSString stringWithFormat:@"Last task of %@ failed waiting for retry", _name];
+    DDLogError(@"Last task of %@ failed waiting for retry", _name);
     
     _waitingForRetry = TRUE;
-    [self suspended];    
+    [self suspended:reason];
 }
 
 - (void)waitForJob:(int)jobId {
     _waitingForJob = [NSNumber numberWithInt:jobId];
     _waitingJobStartTime = [NSDate date];
-    [self stop];
+    [self stop:[NSString stringWithFormat:@"Waiting for job id %d", jobId]];
 }
 
-- (void)stop {
-    DDLogInfo(@"stop queue %@", _name);
+- (void)stop:(NSString *)reason {
+    DDLogInfo(@"stop queue %@ because of %@", _name, reason);
     
     _stopped = TRUE;
-    [self suspended];
+    [self suspended:reason];
 }
 
 - (void)start {
@@ -327,8 +323,8 @@ static NSMutableSet *_activeQueues = nil;
     [self resume];
 }
 
-- (void)suspended {
-    DDLogInfo(@"suspended queue %@", _name);
+- (void)suspended:(NSString *)reason {
+    DDLogInfo(@"suspended queue %@ because of %@", _name, reason);
     _operationQueue.suspended = YES;
 }
 
@@ -368,7 +364,7 @@ static NSMutableSet *_activeQueues = nil;
 
 - (void)items:(void (^)(NSDictionary *userInfo))callback {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
-        FMResultSet *rs = [db executeQuery:@"SELECT params FROM queue ORDER BY ROWID"];
+        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT params FROM %@ ORDER BY taskid", TABLE_NAME]];
 
         while ([rs next]) {
             NSData *blobData = [rs dataForColumnIndex:0];
@@ -387,7 +383,7 @@ static NSMutableSet *_activeQueues = nil;
 
 -(void)recoverPendingTasks {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
-        FMResultSet *rs = [db executeQuery:@"SELECT COUNT(*) FROM queue"];
+        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT COUNT(*) FROM %@", TABLE_NAME]];
 
         if (rs == nil) {
             // Some other error
@@ -445,7 +441,7 @@ static NSMutableSet *_activeQueues = nil;
 
 -(void)deleteTask:(int)taskId db:(FMDatabase *)db {
     [self backgroundTaskBlock:^{
-        BOOL deleted = [db executeUpdate:@"DELETE FROM queue WHERE ROWID = ?", [NSNumber numberWithInt:taskId]];
+        BOOL deleted = [db executeUpdate:[NSString stringWithFormat:@"DELETE FROM %@ WHERE taskid = ?", TABLE_NAME], [NSNumber numberWithInt:taskId]];
         
         if (deleted == FALSE) {
             [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
@@ -464,7 +460,7 @@ static NSMutableSet *_activeQueues = nil;
         sqlite_uint64 taskId;
         NSData *blobData;
         
-        FMResultSet *rs = [db executeQuery:@"SELECT ROWID, params FROM queue ORDER BY ROWID LIMIT 1"];
+        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid LIMIT 1", TABLE_NAME]];
         
         if (rs == nil) {
             // Some other error
