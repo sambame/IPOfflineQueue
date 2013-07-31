@@ -90,7 +90,7 @@ static NSMutableSet *_activeQueues = nil;
         if (stopped) {
             [self stop:@"inital state is stopped"];
         } else {
-            [self start];
+            [self start:@"inital state is started"];
         }
         
         [self openDB];
@@ -197,12 +197,15 @@ static NSMutableSet *_activeQueues = nil;
     DDLogVerbose(@"tryAutoResume(%@): stopped: %d, waitingForJob: %@", _name, _stopped, _waitingForJob);
     
     if (!_stopped && _waitingForJob == nil) {
-        BOOL canAutoResume = !self.delegate || [self.delegate offlineQueueShouldAutomaticallyResume:self];
-
+        BOOL canAutoResume = TRUE;
+        if ([self.delegate respondsToSelector:@selector(offlineQueueShouldAutomaticallyResume:)]) {
+            canAutoResume = [self.delegate offlineQueueShouldAutomaticallyResume:self];
+        }
+        
         DDLogVerbose(@"canAutoResume(%@): %d", _name, canAutoResume);
         
         if (canAutoResume) {
-            [self resume];
+            [self resume:@"auto resume"];
         }
     }    
 }
@@ -266,7 +269,7 @@ static NSMutableSet *_activeQueues = nil;
     // adding a new one.
 
     [self.dbQueue inDatabase:^(FMDatabase *db) {
-        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY id", TABLE_NAME]];
+        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid", TABLE_NAME]];
         
         while ([rs next]) {
             sqlite_uint64 taskid = [rs intForColumnIndex:0];
@@ -316,20 +319,29 @@ static NSMutableSet *_activeQueues = nil;
     [self suspended:reason];
 }
 
-- (void)start {
-    DDLogInfo(@"start queue %@", _name);
+- (void)start:(NSString *)reason {
+    DDLogInfo(@"start queue %@ becouse of %@", _name, reason);
     
     _stopped = FALSE;
-    [self resume];
+    [self resume:reason];
 }
 
 - (void)suspended:(NSString *)reason {
     DDLogInfo(@"suspended queue %@ because of %@", _name, reason);
+    
+    if ([self.delegate respondsToSelector:@selector(offlineQueueWillSuspend:)]) {
+        [self.delegate offlineQueueWillSuspend:self];
+    }
     _operationQueue.suspended = YES;
 }
 
-- (void)resume {
-    DDLogInfo(@"resume queue %@, %d tasks in queue", _name, _operationQueue.operationCount);
+- (void)resume:(NSString *)reason {
+    DDLogInfo(@"resume queue %@ because of %@, %d tasks in queue", _name, reason, _operationQueue.operationCount);
+    
+    if ([self.delegate respondsToSelector:@selector(offlineQueueWillResume:)]) {
+        [self.delegate offlineQueueWillResume:self];
+    }
+    
     _operationQueue.suspended = NO;
 }
 
@@ -423,7 +435,7 @@ static NSMutableSet *_activeQueues = nil;
     
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         [self deleteTask:taskId db:db];
-        [self resume];
+        [self resume:@"resume after async task finished"];
     }];
 }
 

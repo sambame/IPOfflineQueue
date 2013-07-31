@@ -25,11 +25,15 @@ typedef IPOfflineQueueFilterResult (^IPOfflineQueueFilterBlock)(NSDictionary *us
 // Returning IPOfflineQueueResultSuccess will delete the task.
 // Returning IPOfflineQueueResultFailureShouldPauseQueue will pause the queue and the same task will be retried when the queue is resumed.
 //  Typically, you'd only return this if the internet connection is offline or some other global condition prevents ALL queued tasks from executing.
+@required
 - (IPOfflineQueueResult)offlineQueue:(IPOfflineQueue *)queue taskId:(int)taskId executeActionWithUserInfo:(NSDictionary *)userInfo;
 
+@optional
 // Called before auto-resuming upon Reachability changes, app reactivation, or autoResumeInterval elapsed
 - (BOOL)offlineQueueShouldAutomaticallyResume:(IPOfflineQueue *)queue;
 
+-(void)offlineQueueWillResume:(IPOfflineQueue *)queue;
+-(void)offlineQueueWillSuspend:(IPOfflineQueue *)queue;
 @end
 
 @interface IPOfflineQueue : NSObject
@@ -43,7 +47,7 @@ typedef IPOfflineQueueFilterResult (^IPOfflineQueueFilterBlock)(NSDictionary *us
 - (void)close;
 
 - (void)stop:(NSString *)reason;
-- (void)start;
+- (void)start:(NSString *)reason;
 - (void)finishTask:(int)taskId;
 - (void)taskFailed:(int)taskId error:(NSError *)error;
 
