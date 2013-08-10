@@ -451,14 +451,17 @@ static NSMutableSet *_activeQueues = nil;
     }
 }
 
+
 -(void)deleteTask:(int)taskId db:(FMDatabase *)db {
     [self backgroundTaskBlock:^{
-        BOOL deleted = [db executeUpdate:[NSString stringWithFormat:@"DELETE FROM %@ WHERE taskid = ?", TABLE_NAME], [NSNumber numberWithInt:taskId]];
+        NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@ WHERE taskid = ?", TABLE_NAME];
+        NSError *error;
+        BOOL deleted = [db update:sql withErrorAndBindings:&error, [NSNumber numberWithInt:taskId]];
         
         if (deleted == FALSE) {
             [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                      reason:@"Failed to delete queued item after execution"
-                                   userInfo:nil]
+                                   userInfo:@{@"error": error}]
              raise];
         }
         
@@ -472,7 +475,8 @@ static NSMutableSet *_activeQueues = nil;
         sqlite_uint64 taskId;
         NSData *blobData;
         
-        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid LIMIT 1", TABLE_NAME]];
+        NSString *sql = [NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid LIMIT 1", TABLE_NAME];
+        FMResultSet *rs = [db executeQuery:sql];
         
         if (rs == nil) {
             // Some other error
