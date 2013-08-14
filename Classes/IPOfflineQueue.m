@@ -176,7 +176,17 @@ static NSMutableSet *_activeQueues = nil;
         
         if (existingTables < 1) {
             DDLogInfo(@"[IPOfflineQueue] Creating new schema");
-            [db executeUpdate:[NSString stringWithFormat:@"CREATE TABLE %@ (taskid INTEGER PRIMARY KEY AUTOINCREMENT, params BLOB NOT NULL)", TABLE_NAME]];
+            
+            NSString *sql = [NSString stringWithFormat:@"CREATE TABLE %@ (taskid INTEGER PRIMARY KEY AUTOINCREMENT, params BLOB NOT NULL)", TABLE_NAME];
+            NSError *error;
+            BOOL deleted = [db update:sql withErrorAndBindings:&error];
+            
+            if (deleted == FALSE) {
+                [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
+                                         reason:@"Failed to create schema"
+                                       userInfo:@{@"error": error}]
+                 raise];
+            }
             
             [self clear:db];
         } else {
@@ -246,11 +256,14 @@ static NSMutableSet *_activeQueues = nil;
             [archiver finishEncoding];
             archiver = nil;
 
-            BOOL inserted = [db executeUpdate:[NSString stringWithFormat:@"INSERT INTO %@ (params) VALUES (?)", TABLE_NAME], data];
+            NSError *error;
+            NSString *sql = [NSString stringWithFormat:@"INSERT INTO %@ (params) VALUES (?)", TABLE_NAME];
+            BOOL inserted = [db update:sql withErrorAndBindings:&error, data];
             
             if (inserted == FALSE) {
                 [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
-                                         reason:[NSString stringWithFormat:@"Failed to insert new queued item"] userInfo:nil
+                                         reason:[NSString stringWithFormat:@"Failed to insert new queued item"]
+                                       userInfo:@{@"error": error}
                   ] raise];
             }                        
         }];
@@ -272,7 +285,7 @@ static NSMutableSet *_activeQueues = nil;
         FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid", TABLE_NAME]];
         
         while ([rs next]) {
-            sqlite_uint64 taskid = [rs intForColumnIndex:0];
+            sqlite_uint64 taskId = [rs intForColumnIndex:0];
             NSData *blobData = [rs dataForColumnIndex:1];
             
             NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingWithData:blobData];
@@ -281,7 +294,7 @@ static NSMutableSet *_activeQueues = nil;
             unarchiver = nil;
             
             if (filterBlock(userInfo) == IPOfflineQueueFilterResultAttemptToDelete) {
-                [db executeUpdate:[NSString stringWithFormat:@"DELETE FROM ? WHERE taskid = %@", TABLE_NAME], taskid];
+                [self deleteTask:taskId db:db];
             }
         }
         
@@ -293,7 +306,16 @@ static NSMutableSet *_activeQueues = nil;
     [self backgroundTaskBlock:^{
         [_operationQueue cancelAllOperations];
         [self.dbQueue inDatabase:^(FMDatabase *db) {
-            [db executeUpdate:[NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME]];
+            NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME];
+            NSError *error;
+            BOOL deleted = [db update:sql withErrorAndBindings:&error];
+            
+            if (deleted == FALSE) {
+                [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
+                                         reason:@"Failed to delete all queued items"
+                                       userInfo:@{@"error": error}]
+                 raise];
+            }
         }];
     }];
 }
