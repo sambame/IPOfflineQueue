@@ -14,8 +14,6 @@ static const int ddLogLevel = LOG_LEVEL_INFO;
 static const int ddLogLevel = LOG_LEVEL_WARN;
 #endif
 
-#define kMaxRetrySeconds 10000
-
 static NSMutableSet *_activeQueues = nil;
 
 #define TABLE_NAME @"queue2"
@@ -28,8 +26,6 @@ static NSMutableSet *_activeQueues = nil;
     
     NSNumber *_waitingForJob;
     NSDate *_waitingJobStartTime;
-    
-    BOOL _waitingForRetry;
 }
 @end
 
@@ -119,12 +115,6 @@ static NSMutableSet *_activeQueues = nil;
                         [NSString stringWithFormat:@"%@.queue", _name]];    
 }
 
--(void)dropDB {
-    [self closeDB];
-    [[NSFileManager defaultManager] removeItemAtPath:[self dbFilePath] error:nil];
-    [self openDB];
-}
-
 -(void)closeDB {
     FMDatabaseQueue *dbQueue = self.currentDbQueue;
     
@@ -188,7 +178,7 @@ static NSMutableSet *_activeQueues = nil;
                  raise];
             }
             
-            [self clear:db];
+            [self clear];
         } else {
             isNewQueue = NO;
         };
@@ -246,7 +236,7 @@ static NSMutableSet *_activeQueues = nil;
     }];
 }
 
-- (void)enqueueActionWithUserInfo:(NSDictionary *)userInfo
+-(void)enqueueActionWithUserInfo:(NSDictionary *)userInfo
 {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         [self backgroundTaskBlock:^{
@@ -254,7 +244,6 @@ static NSMutableSet *_activeQueues = nil;
             NSKeyedArchiver *archiver = [[NSKeyedArchiver alloc] initForWritingWithMutableData:data];
             [archiver encodeObject:userInfo forKey:@"userInfo"];
             [archiver finishEncoding];
-            archiver = nil;
 
             NSError *error;
             NSString *sql = [NSString stringWithFormat:@"INSERT INTO %@ (params) VALUES (?)", TABLE_NAME];
@@ -285,14 +274,11 @@ static NSMutableSet *_activeQueues = nil;
         FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid", TABLE_NAME]];
         
         while ([rs next]) {
-            sqlite_uint64 taskId = [rs intForColumnIndex:0];
+            sqlite_uint64 taskId = [rs unsignedLongLongIntForColumnIndex:0];
             NSData *blobData = [rs dataForColumnIndex:1];
             
-            NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingWithData:blobData];
-            NSDictionary *userInfo = [unarchiver decodeObjectForKey:@"userInfo"];
-            [unarchiver finishDecoding];
-            unarchiver = nil;
-            
+            NSDictionary *userInfo = [self decodeTaskInfo:blobData];
+
             if (filterBlock(userInfo) == IPOfflineQueueFilterResultAttemptToDelete) {
                 [self deleteTask:taskId db:db];
             }
@@ -302,7 +288,7 @@ static NSMutableSet *_activeQueues = nil;
     }];
 }
 
-- (void)clear:(FMDatabase*)db {
+- (void)clear {
     [self backgroundTaskBlock:^{
         [_operationQueue cancelAllOperations];
         [self.dbQueue inDatabase:^(FMDatabase *db) {
@@ -323,15 +309,14 @@ static NSMutableSet *_activeQueues = nil;
 - (void)waitForRetry {
     NSString *reason = [NSString stringWithFormat:@"Last task of %@ failed waiting for retry", _name];
     DDLogError(@"Last task of %@ failed waiting for retry", _name);
-    
-    _waitingForRetry = TRUE;
+
     [self suspended:reason];
 }
 
-- (void)waitForJob:(int)jobId {
+- (void)waitForJob:(task_id)jobId {
     _waitingForJob = [NSNumber numberWithInt:jobId];
     _waitingJobStartTime = [NSDate date];
-    [self stop:[NSString stringWithFormat:@"Waiting for job id %d", jobId]];
+    [self stop:[NSString stringWithFormat:@"Waiting for job id %lld", jobId]];
 }
 
 - (void)stop:(NSString *)reason {
@@ -388,7 +373,11 @@ static NSMutableSet *_activeQueues = nil;
             }
 
             if (newInterval > 0) {
-                _autoResumeTimer = [NSTimer scheduledTimerWithTimeInterval:newInterval target:self selector:@selector(autoResumeTimerFired:) userInfo:nil repeats:YES];
+                _autoResumeTimer = [NSTimer scheduledTimerWithTimeInterval:newInterval
+                                                                    target:self
+                                                                  selector:@selector(autoResumeTimerFired:)
+                                                                  userInfo:nil
+                                                                   repeats:YES];
             } else {
                 _autoResumeTimer = nil;
             }
@@ -402,12 +391,8 @@ static NSMutableSet *_activeQueues = nil;
 
         while ([rs next]) {
             NSData *blobData = [rs dataForColumnIndex:0];
-            
-            NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingWithData:blobData];
-            NSDictionary *userInfo = [unarchiver decodeObjectForKey:@"userInfo"];
-            [unarchiver finishDecoding];
-            unarchiver = nil;
-            
+            NSDictionary *userInfo = [self decodeTaskInfo:blobData];
+
             callback(userInfo);
         }
         
@@ -446,13 +431,13 @@ static NSMutableSet *_activeQueues = nil;
 
 // this task has failed, need to be rerun
 // next time the queue will run again it will pop the task again
--(void)taskFailed:(int)taskId error:(NSError *)error{
-    DDLogError(@"Task %d failed", taskId);
+-(void)taskFailed:(task_id)taskId error:(NSError *)error{
+    DDLogError(@"Task %lld failed", taskId);
     
     [self resetWaitingTask:taskId error:error]; // TODO run in the proper queue
 }
 
--(void)finishTask:(int)taskId {
+-(void)finishTask:(task_id)taskId {
     DDLogInfo(@"Task %d finished", taskId);
     
     [self.dbQueue inDatabase:^(FMDatabase *db) {
@@ -461,12 +446,12 @@ static NSMutableSet *_activeQueues = nil;
     }];
 }
 
--(void)resetWaitingTask:(int)taskId error:(NSError *)error {
-    if ([_waitingForJob integerValue] == taskId) {
+-(void)resetWaitingTask:(task_id)taskId error:(NSError *)error {
+    if ([_waitingForJob unsignedLongLongValue] == taskId) {
         if (error) {
-            DDLogInfo(@"Task %d finished with error %@ total time %f seconds", taskId, error, [_waitingJobStartTime timeIntervalSinceNow]);
+            DDLogInfo(@"Task %d finished with error %@ total time %f seconds", taskId, error, -[_waitingJobStartTime timeIntervalSinceNow]);
         } else {
-            DDLogInfo(@"Task %d finished total time %f seconds", taskId, [_waitingJobStartTime timeIntervalSinceNow]);
+            DDLogInfo(@"Task %d finished total time %f seconds", taskId, -[_waitingJobStartTime timeIntervalSinceNow]);
         }
         _waitingForJob = nil;
         _waitingJobStartTime = nil;
@@ -474,11 +459,11 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 
--(void)deleteTask:(int)taskId db:(FMDatabase *)db {
+-(void)deleteTask:(task_id)taskId db:(FMDatabase *)db {
     [self backgroundTaskBlock:^{
         NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@ WHERE taskid = ?", TABLE_NAME];
         NSError *error;
-        BOOL deleted = [db update:sql withErrorAndBindings:&error, [NSNumber numberWithInt:taskId]];
+        BOOL deleted = [db update:sql withErrorAndBindings:&error, [NSNumber numberWithUnsignedLongLong:taskId]];
         
         if (deleted == FALSE) {
             [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
@@ -494,7 +479,7 @@ static NSMutableSet *_activeQueues = nil;
 - (void)execute {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
     
-        sqlite_uint64 taskId;
+        sqlite_uint64 taskId = 0;
         NSData *blobData;
         
         NSString *sql = [NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid LIMIT 1", TABLE_NAME];
@@ -509,7 +494,7 @@ static NSMutableSet *_activeQueues = nil;
         
         BOOL hasData = [rs next];
         if (hasData) {
-            taskId = [rs intForColumnIndex:0];
+            taskId = [rs unsignedLongLongIntForColumnIndex:0];
             blobData = [rs dataForColumnIndex:1];
         }
         
@@ -520,12 +505,9 @@ static NSMutableSet *_activeQueues = nil;
         if (isEmpty) {
             return;
         }
-        
-        NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingWithData:blobData];
-        NSDictionary *userInfo = [unarchiver decodeObjectForKey:@"userInfo"];
-        [unarchiver finishDecoding];
-        unarchiver = nil;
-        
+
+        NSDictionary *userInfo= [self decodeTaskInfo:blobData];
+
         IPOfflineQueueResult result = [self.delegate offlineQueue:self taskId:taskId executeActionWithUserInfo:userInfo];
         if (result == IPOfflineQueueResultSuccess) {
             [self deleteTask:taskId db:db];
@@ -535,6 +517,18 @@ static NSMutableSet *_activeQueues = nil;
             [self waitForRetry]; // Stop the queue, wait for retry
         }
     }];
+}
+
+- (NSDictionary *)decodeTaskInfo:(NSData *)blobData {
+    NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingWithData:blobData];
+    NSDictionary *userInfo = [unarchiver decodeObjectForKey:@"userInfo"];
+    [unarchiver finishDecoding];
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "UnusedValue"
+    unarchiver = nil;
+#pragma clang diagnostic pop
+
+    return userInfo;
 }
 
 @end

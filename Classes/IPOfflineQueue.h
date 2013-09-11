@@ -14,6 +14,8 @@ typedef enum {
 
 typedef IPOfflineQueueFilterResult (^IPOfflineQueueFilterBlock)(NSDictionary *userInfo);
 
+typedef unsigned long long int task_id;
+
 @class IPOfflineQueue;
 
 
@@ -26,7 +28,7 @@ typedef IPOfflineQueueFilterResult (^IPOfflineQueueFilterBlock)(NSDictionary *us
 // Returning IPOfflineQueueResultFailureShouldPauseQueue will pause the queue and the same task will be retried when the queue is resumed.
 //  Typically, you'd only return this if the internet connection is offline or some other global condition prevents ALL queued tasks from executing.
 @required
-- (IPOfflineQueueResult)offlineQueue:(IPOfflineQueue *)queue taskId:(int)taskId executeActionWithUserInfo:(NSDictionary *)userInfo;
+- (IPOfflineQueueResult)offlineQueue:(IPOfflineQueue *)queue taskId:(task_id)taskId executeActionWithUserInfo:(NSDictionary *)userInfo;
 
 @optional
 // Called before auto-resuming upon Reachability changes, app reactivation, or autoResumeInterval elapsed
@@ -48,8 +50,8 @@ typedef IPOfflineQueueFilterResult (^IPOfflineQueueFilterBlock)(NSDictionary *us
 
 - (void)stop:(NSString *)reason;
 - (void)start:(NSString *)reason;
-- (void)finishTask:(int)taskId;
-- (void)taskFailed:(int)taskId error:(NSError *)error;
+- (void)finishTask:(task_id)taskId;
+- (void)taskFailed:(task_id)taskId error:(NSError *)error;
 
 - (void)items:(void (^)(NSDictionary *userInfo))callback;
 
