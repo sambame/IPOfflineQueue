@@ -34,6 +34,7 @@ static NSMutableSet *_activeQueues = nil;
 @synthesize autoResumeInterval = _autoResumeInterval;
 @synthesize name = _name;
 
+#define DDLogCritical(frmt, ...)   LOG_OBJC_MAYBE(LOG_ASYNC_ERROR,   ddLogLevel, LOG_FLAG_ERROR,   0, frmt, ##__VA_ARGS__);[DDLog flushLog];
 
 #pragma mark - Initialization and schema management
 
@@ -44,9 +45,9 @@ static NSMutableSet *_activeQueues = nil;
         @synchronized([self class]) {
             if (_activeQueues) {
                 if ([_activeQueues containsObject:name]) {
-                    [[NSException exceptionWithName:@"IPOfflineQueueDuplicateNameException" 
-                        reason:[NSString stringWithFormat:@"[IPOfflineQueue] Queue already exists with name: %@", name] userInfo:nil
-                    ] raise];
+                    [[NSException exceptionWithName:@"IPOfflineQueueDuplicateNameException"
+                                             reason:[NSString stringWithFormat:@"[IPOfflineQueue] Queue already exists with name: %@", name] userInfo:nil
+                      ] raise];
                 }
                 
                 [_activeQueues addObject:name];
@@ -59,7 +60,7 @@ static NSMutableSet *_activeQueues = nil;
         self.delegate = d;
         
         _name = name;
-
+        
         [[NSNotificationCenter defaultCenter] addObserverForName:kReachabilityChangedNotification
                                                           object:nil
                                                            queue:nil
@@ -78,7 +79,7 @@ static NSMutableSet *_activeQueues = nil;
                                                               }
                                                           });
                                                       }];
-
+        
         _operationQueue = [[NSOperationQueue alloc] init];
         _operationQueue.name = name;
         _operationQueue.maxConcurrentOperationCount = 1;
@@ -112,7 +113,7 @@ static NSMutableSet *_activeQueues = nil;
 
 -(NSString*)dbFilePath {
     return [[NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) objectAtIndex:0] stringByAppendingPathComponent:
-                        [NSString stringWithFormat:@"%@.queue", _name]];    
+            [NSString stringWithFormat:@"%@.queue", _name]];
 }
 
 -(void)closeDB {
@@ -144,7 +145,7 @@ static NSMutableSet *_activeQueues = nil;
                                      reason:[NSString stringWithFormat:@"Failed to open database"] userInfo:nil
               ] raise];
         }
-
+        
         NSMutableDictionary *tls = [[NSThread currentThread] threadDictionary];
         tls[self.tlsEntry] = dbQueue;
     }
@@ -169,9 +170,11 @@ static NSMutableSet *_activeQueues = nil;
             
             NSString *sql = [NSString stringWithFormat:@"CREATE TABLE %@ (taskid INTEGER PRIMARY KEY AUTOINCREMENT, params BLOB NOT NULL)", TABLE_NAME];
             NSError *error;
-            BOOL deleted = [db update:sql withErrorAndBindings:&error];
+            BOOL created = [db update:sql withErrorAndBindings:&error];
             
-            if (deleted == FALSE) {
+            if (created == FALSE) {
+                DDLogCritical(@"CRITICAL: Failed to create schema %@", error);
+                
                 [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                          reason:@"Failed to create schema"
                                        userInfo:@{@"error": error}]
@@ -207,7 +210,7 @@ static NSMutableSet *_activeQueues = nil;
         if (canAutoResume) {
             [self resume:@"auto resume"];
         }
-    }    
+    }
 }
 
 - (void)autoResumeTimerFired:(NSTimer*)timer {
@@ -218,9 +221,9 @@ static NSMutableSet *_activeQueues = nil;
 
 -(void)backgroundTaskBlock:(void (^)())block {
     __block UIBackgroundTaskIdentifier backgroundTask = [[UIApplication sharedApplication] beginBackgroundTaskWithExpirationHandler:^{
-            backgroundTask = UIBackgroundTaskInvalid;
+        backgroundTask = UIBackgroundTaskInvalid;
     }];
-
+    
     @try {
         block();
     }
@@ -244,17 +247,19 @@ static NSMutableSet *_activeQueues = nil;
             NSKeyedArchiver *archiver = [[NSKeyedArchiver alloc] initForWritingWithMutableData:data];
             [archiver encodeObject:userInfo forKey:@"userInfo"];
             [archiver finishEncoding];
-
+            
             NSError *error;
             NSString *sql = [NSString stringWithFormat:@"INSERT INTO %@ (params) VALUES (?)", TABLE_NAME];
             BOOL inserted = [db update:sql withErrorAndBindings:&error, data];
             
             if (inserted == FALSE) {
+                DDLogCritical(@"CRITICAL: Failed to insert task table %@", error);
+                
                 [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                          reason:[NSString stringWithFormat:@"Failed to insert new queued item"]
                                        userInfo:@{@"error": error}
                   ] raise];
-            }                        
+            }
         }];
         
         [self enqueueOperation];
@@ -269,7 +274,7 @@ static NSMutableSet *_activeQueues = nil;
     //
     // With this simple, quick-and-dirty method, you can e.g. delete any existing "update" requests before
     // adding a new one.
-
+    
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid", TABLE_NAME]];
         
@@ -278,7 +283,7 @@ static NSMutableSet *_activeQueues = nil;
             NSData *blobData = [rs dataForColumnIndex:1];
             
             NSDictionary *userInfo = [self decodeTaskInfo:blobData];
-
+            
             if (filterBlock(userInfo) == IPOfflineQueueFilterResultAttemptToDelete) {
                 [self deleteTask:taskId db:db];
             }
@@ -297,6 +302,8 @@ static NSMutableSet *_activeQueues = nil;
             BOOL deleted = [db update:sql withErrorAndBindings:&error];
             
             if (deleted == FALSE) {
+                DDLogCritical(@"CRITICAL: Failed to delete all queued items %@", error);
+                
                 [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                          reason:@"Failed to delete all queued items"
                                        userInfo:@{@"error": error}]
@@ -309,7 +316,7 @@ static NSMutableSet *_activeQueues = nil;
 - (void)waitForRetry {
     NSString *reason = [NSString stringWithFormat:@"Last task of %@ failed waiting for retry", _name];
     DDLogError(@"Last task of %@ failed waiting for retry", _name);
-
+    
     [self suspended:reason];
 }
 
@@ -371,7 +378,7 @@ static NSMutableSet *_activeQueues = nil;
                 [_autoResumeTimer invalidate];
                 _autoResumeTimer = nil;
             }
-
+            
             if (newInterval > 0) {
                 _autoResumeTimer = [NSTimer scheduledTimerWithTimeInterval:newInterval
                                                                     target:self
@@ -388,11 +395,11 @@ static NSMutableSet *_activeQueues = nil;
 - (void)items:(void (^)(NSDictionary *userInfo))callback {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT params FROM %@ ORDER BY taskid", TABLE_NAME]];
-
+        
         while ([rs next]) {
             NSData *blobData = [rs dataForColumnIndex:0];
             NSDictionary *userInfo = [self decodeTaskInfo:blobData];
-
+            
             callback(userInfo);
         }
         
@@ -403,9 +410,17 @@ static NSMutableSet *_activeQueues = nil;
 -(void)recoverPendingTasks {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT COUNT(*) FROM %@", TABLE_NAME]];
-
+        
         if (rs == nil) {
-            // Some other error
+            NSDictionary *userInfo = @{@"code": [NSNumber numberWithInt:[db lastErrorCode]], @"message": [db lastErrorMessage]};
+            
+            NSError *error = [NSError errorWithDomain:@"sqlite"
+                                                 code:[db lastErrorCode]
+                                             userInfo:userInfo];
+            
+            DDLogCritical(@"CRITICAL: Failed to get amount of pending jobs %@", error);
+            
+            
             [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                      reason:@"Failed to get amount of pending jobs"
                                    userInfo:nil] raise];
@@ -418,9 +433,9 @@ static NSMutableSet *_activeQueues = nil;
         }
         
         [rs close];
-
+        
         DDLogInfo(@"Queue %@ have %d pending jobs", _name, pendingJobs);
-                  
+        
         if (pendingJobs > 0) {
             for (int i=0;i<pendingJobs;i++) {
                 [self enqueueOperation];
@@ -438,7 +453,7 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 -(void)finishTask:(task_id)taskId {
-    DDLogInfo(@"Task %d finished", taskId);
+    DDLogInfo(@"Task %llu finished", taskId);
     
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         [self deleteTask:taskId db:db];
@@ -449,9 +464,9 @@ static NSMutableSet *_activeQueues = nil;
 -(void)resetWaitingTask:(task_id)taskId error:(NSError *)error {
     if ([_waitingForJob unsignedLongLongValue] == taskId) {
         if (error) {
-            DDLogInfo(@"Task %d finished with error %@ total time %f seconds", taskId, error, -[_waitingJobStartTime timeIntervalSinceNow]);
+            DDLogInfo(@"Task %llu finished with error %@ total time %f seconds", taskId, error, -[_waitingJobStartTime timeIntervalSinceNow]);
         } else {
-            DDLogInfo(@"Task %d finished total time %f seconds", taskId, -[_waitingJobStartTime timeIntervalSinceNow]);
+            DDLogInfo(@"Task %llu finished total time %f seconds", taskId, -[_waitingJobStartTime timeIntervalSinceNow]);
         }
         _waitingForJob = nil;
         _waitingJobStartTime = nil;
@@ -466,6 +481,8 @@ static NSMutableSet *_activeQueues = nil;
         BOOL deleted = [db update:sql withErrorAndBindings:&error, [NSNumber numberWithUnsignedLongLong:taskId]];
         
         if (deleted == FALSE) {
+            DDLogCritical(@"CRITICAL: Failed to delete queued item after execution %@", error);
+            
             [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                      reason:@"Failed to delete queued item after execution"
                                    userInfo:@{@"error": error}]
@@ -478,7 +495,7 @@ static NSMutableSet *_activeQueues = nil;
 
 - (void)execute {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
-    
+        
         sqlite_uint64 taskId = 0;
         NSData *blobData;
         
@@ -486,10 +503,17 @@ static NSMutableSet *_activeQueues = nil;
         FMResultSet *rs = [db executeQuery:sql];
         
         if (rs == nil) {
-            // Some other error
+            NSDictionary *userInfo = @{@"code": [NSNumber numberWithInt:[db lastErrorCode]], @"message": [db lastErrorMessage]};
+            
+            NSError *error = [NSError errorWithDomain:@"sqlite"
+                                                 code:[db lastErrorCode]
+                                             userInfo:userInfo];
+            
+            DDLogCritical(@"CRITICAL: Failed to select next queued item %@", error);
+            
             [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                      reason:@"Failed to select next queued item"
-                                   userInfo:nil] raise];
+                                   userInfo:userInfo] raise];
         }
         
         BOOL hasData = [rs next];
@@ -505,9 +529,9 @@ static NSMutableSet *_activeQueues = nil;
         if (isEmpty) {
             return;
         }
-
+        
         NSDictionary *userInfo= [self decodeTaskInfo:blobData];
-
+        
         IPOfflineQueueResult result = [self.delegate offlineQueue:self taskId:taskId executeActionWithUserInfo:userInfo];
         if (result == IPOfflineQueueResultSuccess) {
             [self deleteTask:taskId db:db];
@@ -527,7 +551,7 @@ static NSMutableSet *_activeQueues = nil;
 #pragma ide diagnostic ignored "UnusedValue"
     unarchiver = nil;
 #pragma clang diagnostic pop
-
+    
     return userInfo;
 }
 
