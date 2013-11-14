@@ -12,7 +12,6 @@ Pod::Spec.new do |s|
   s.source_files = 'Classes/IPOfflineQueue.{h,m}'
 
   s.dependency 'CocoaLumberjack'
-  s.dependency 'FMDB'
   s.dependency 'Reachability'
 
   s.requires_arc = true  
