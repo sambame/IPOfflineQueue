@@ -175,9 +175,15 @@ static NSMutableSet *_activeQueues = nil;
             if (created == FALSE) {
                 DDLogCritical(@"CRITICAL: Failed to create schema %@", error);
                 
+                NSDictionary *userInfo;
+                
+                if (error) {
+                    userInfo = @{@"error": error};
+                }
+                
                 [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                          reason:@"Failed to create schema"
-                                       userInfo:@{@"error": error}]
+                                       userInfo:userInfo]
                  raise];
             }
             
@@ -255,10 +261,15 @@ static NSMutableSet *_activeQueues = nil;
             if (inserted == FALSE) {
                 DDLogCritical(@"CRITICAL: Failed to insert task table %@", error);
                 
+                NSDictionary *userInfo;
+                
+                if (error) {
+                    userInfo = @{@"error": error};
+                }
+                
                 [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                          reason:[NSString stringWithFormat:@"Failed to insert new queued item"]
-                                       userInfo:@{@"error": error}
-                  ] raise];
+                                       userInfo:userInfo] raise];
             }
         }];
         
@@ -304,9 +315,15 @@ static NSMutableSet *_activeQueues = nil;
             if (deleted == FALSE) {
                 DDLogCritical(@"CRITICAL: Failed to delete all queued items %@", error);
                 
+                NSDictionary *userInfo;
+                
+                if (error) {
+                    userInfo = @{@"error": error};
+                }
+                
                 [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                          reason:@"Failed to delete all queued items"
-                                       userInfo:@{@"error": error}]
+                                       userInfo:userInfo]
                  raise];
             }
         }];
@@ -321,7 +338,7 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 - (void)waitForJob:(task_id)jobId {
-    _waitingForJob = [NSNumber numberWithInt:jobId];
+    _waitingForJob = [NSNumber numberWithUnsignedLongLong:jobId];
     _waitingJobStartTime = [NSDate date];
     [self stop:[NSString stringWithFormat:@"Waiting for job id %lld", jobId]];
 }
@@ -483,9 +500,15 @@ static NSMutableSet *_activeQueues = nil;
         if (deleted == FALSE) {
             DDLogCritical(@"CRITICAL: Failed to delete queued item after execution %@", error);
             
+            NSDictionary *userInfo;
+            
+            if (error) {
+                userInfo = @{@"error": error};
+            }
+            
             [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
                                      reason:@"Failed to delete queued item after execution"
-                                   userInfo:@{@"error": error}]
+                                   userInfo:userInfo]
              raise];
         }
         
