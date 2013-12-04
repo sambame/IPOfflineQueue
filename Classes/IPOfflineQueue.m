@@ -367,7 +367,7 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 - (void)resume:(NSString *)reason {
-    DDLogInfo(@"resume queue %@ because of %@, %d tasks in queue", _name, reason, _operationQueue.operationCount);
+    DDLogInfo(@"resume queue %@ because of %@, %d tasks in queue", _name, reason, (int)_operationQueue.operationCount);
     
     if ([self.delegate respondsToSelector:@selector(offlineQueueWillResume:)]) {
         [self.delegate offlineQueueWillResume:self];
