@@ -17,6 +17,7 @@ static const int ddLogLevel = LOG_LEVEL_WARN;
 static NSMutableSet *_activeQueues = nil;
 
 #define TABLE_NAME @"queue2"
+#define BUSY_RETRY_TIMEOUT 50
 
 @interface IPOfflineQueue() {
     NSOperationQueue *_operationQueue;
@@ -308,6 +309,7 @@ static NSMutableSet *_activeQueues = nil;
     [self backgroundTaskBlock:^{
         [_operationQueue cancelAllOperations];
         [self.dbQueue inDatabase:^(FMDatabase *db) {
+            db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
             NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME];
             NSError *error;
             BOOL deleted = [db update:sql withErrorAndBindings:&error];
@@ -493,6 +495,7 @@ static NSMutableSet *_activeQueues = nil;
 
 -(void)deleteTask:(task_id)taskId db:(FMDatabase *)db {
     [self backgroundTaskBlock:^{
+        db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
         NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@ WHERE taskid = ?", TABLE_NAME];
         NSError *error;
         BOOL deleted = [db update:sql withErrorAndBindings:&error, [NSNumber numberWithUnsignedLongLong:taskId]];
@@ -553,7 +556,7 @@ static NSMutableSet *_activeQueues = nil;
             return;
         }
         
-        NSDictionary *userInfo= [self decodeTaskInfo:blobData];
+        NSDictionary *userInfo = [self decodeTaskInfo:blobData];
         
         IPOfflineQueueResult result = [self.delegate offlineQueue:self taskId:taskId executeActionWithUserInfo:userInfo];
         if (result == IPOfflineQueueResultSuccess) {
