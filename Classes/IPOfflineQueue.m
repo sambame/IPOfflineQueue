@@ -250,6 +250,7 @@ static NSMutableSet *_activeQueues = nil;
 {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         [self backgroundTaskBlock:^{
+            db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
             NSMutableData *data = [[NSMutableData alloc] init];
             NSKeyedArchiver *archiver = [[NSKeyedArchiver alloc] initForWritingWithMutableData:data];
             [archiver encodeObject:userInfo forKey:@"userInfo"];
