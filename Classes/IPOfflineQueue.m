@@ -22,7 +22,7 @@ static NSMutableSet *_activeQueues = nil;
 @interface IPOfflineQueue() {
     NSOperationQueue *_operationQueue;
     NSTimer *_autoResumeTimer;
-    
+    FMDatabaseQueue* _dbQueue;
     BOOL _stopped;
     
     NSNumber *_waitingForJob;
@@ -56,6 +56,8 @@ static NSMutableSet *_activeQueues = nil;
                 _activeQueues = [[NSMutableSet alloc] initWithObjects:name, nil];
             }
         }
+        
+        _dbQueue = [FMDatabaseQueue databaseQueueWithPath:[self dbFilePath]];
         
         self.autoResumeInterval = 0;
         self.delegate = d;
@@ -118,44 +120,20 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 -(void)closeDB {
-    FMDatabaseQueue *dbQueue = self.currentDbQueue;
-    
-    if (dbQueue) {
-        [dbQueue close];
-    }
+    [_dbQueue close];
 }
 
 -(NSString *) tlsEntry {
     return [NSString stringWithFormat:@"dbQueue%@", self.name];
 }
 
--(FMDatabaseQueue *) currentDbQueue {
-    NSMutableDictionary *tls = [NSThread currentThread].threadDictionary;
-    
-    return tls[self.tlsEntry];
-}
-
 -(FMDatabaseQueue *) dbQueue {
-    FMDatabaseQueue *dbQueue = self.currentDbQueue;
-    
-    if (dbQueue == nil) {
-        dbQueue = [FMDatabaseQueue databaseQueueWithPath:[self dbFilePath]];
-        
-        if (dbQueue == nil) {
-            [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
-                                     reason:[NSString stringWithFormat:@"Failed to open database"] userInfo:nil
-              ] raise];
-        }
-        
-        NSMutableDictionary *tls = [[NSThread currentThread] threadDictionary];
-        tls[self.tlsEntry] = dbQueue;
-    }
-    
-    return dbQueue;
+    return _dbQueue;
 }
 
 -(void)openDB {
     DDLogInfo(@"Is SQLite compiled with it's thread safe options turned on? %@!", [FMDatabase isSQLiteThreadSafe] ? @"Yes" : @"No");
+
     
     __block bool isNewQueue = YES;
     [self.dbQueue inDatabase:^(FMDatabase *db) {
@@ -425,6 +403,10 @@ static NSMutableSet *_activeQueues = nil;
         
         [rs close];
     }];
+}
+
+-(NSUInteger)count {
+    return _operationQueue.operationCount;
 }
 
 -(void)recoverPendingTasks {

@@ -46,7 +46,10 @@ typedef unsigned long long int task_id;
 // userInfo must be serializable
 - (void)enqueueActionWithUserInfo:(NSDictionary *)userInfo;
 
+- (NSUInteger)count;
+
 - (void)close;
+- (void)clear;
 
 - (void)stop:(NSString *)reason;
 - (void)start:(NSString *)reason;
