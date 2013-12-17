@@ -24,6 +24,7 @@ static NSMutableSet *_activeQueues = nil;
     NSTimer *_autoResumeTimer;
     FMDatabaseQueue* _dbQueue;
     BOOL _stopped;
+    BOOL _isNetworkReachable;
     
     NSNumber *_waitingForJob;
     NSDate *_waitingJobStartTime;
@@ -35,7 +36,7 @@ static NSMutableSet *_activeQueues = nil;
 @synthesize autoResumeInterval = _autoResumeInterval;
 @synthesize name = _name;
 
-#define DDLogCritical(frmt, ...)   LOG_OBJC_MAYBE(LOG_ASYNC_ERROR,   ddLogLevel, LOG_FLAG_ERROR,   0, frmt, ##__VA_ARGS__);[DDLog flushLog];
+#define DDLogCritical(frmt, ...)   LOG_OBJC_MAYBE(NO,   ddLogLevel, LOG_FLAG_ERROR,   0, frmt, ##__VA_ARGS__);[DDLog flushLog];
 
 #pragma mark - Initialization and schema management
 
@@ -64,28 +65,28 @@ static NSMutableSet *_activeQueues = nil;
         
         _name = name;
         
-        [[NSNotificationCenter defaultCenter] addObserverForName:kReachabilityChangedNotification
-                                                          object:nil
-                                                           queue:nil
-                                                      usingBlock:^(NSNotification *aNotification) {
-                                                          dispatch_async(dispatch_get_main_queue(), ^{
-                                                              Reachability *reachability = aNotification.object;
-                                                              
-                                                              NetworkStatus remoteHostStatus = reachability.currentReachabilityStatus;
-                                                              
-                                                              if (remoteHostStatus == NotReachable) {
-                                                                  DDLogInfo(@"suspend queue %@ via reachability", _name);
-                                                                  [self suspended:@"reachability"];
-                                                              } else {
-                                                                  DDLogInfo(@"try resume queue %@ via reachability", _name);
-                                                                  [self tryAutoResume];
-                                                              }
-                                                          });
-                                                      }];
-        
         _operationQueue = [[NSOperationQueue alloc] init];
         _operationQueue.name = name;
         _operationQueue.maxConcurrentOperationCount = 1;
+        
+        [[NSNotificationCenter defaultCenter] addObserverForName:kReachabilityChangedNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue currentQueue]
+                                                      usingBlock:^(NSNotification *aNotification) {
+                                                          Reachability *reachability = aNotification.object;
+                                                              
+                                                          NetworkStatus remoteHostStatus = reachability.currentReachabilityStatus;
+                                                      
+                                                          _isNetworkReachable = remoteHostStatus != NotReachable;
+                                                      
+                                                          if (remoteHostStatus == NotReachable) {
+                                                              DDLogInfo(@"suspend queue %@ via reachability", _name);
+                                                              [self suspended:@"reachability"];
+                                                          } else {
+                                                              DDLogInfo(@"try resume queue %@ via reachability", _name);
+                                                              [self tryAutoResume:@"Notwork reachable again"];
+                                                          }
+                                                      }];
         
         if (stopped) {
             [self stop:@"inital state is stopped"];
@@ -121,10 +122,6 @@ static NSMutableSet *_activeQueues = nil;
 
 -(void)closeDB {
     [_dbQueue close];
-}
-
--(NSString *) tlsEntry {
-    return [NSString stringWithFormat:@"dbQueue%@", self.name];
 }
 
 -(FMDatabaseQueue *) dbQueue {
@@ -177,29 +174,25 @@ static NSMutableSet *_activeQueues = nil;
     }
 }
 
-- (void)tryAutoResume {
-    if (_operationQueue.isSuspended == FALSE) {
+- (void)tryAutoResume:(NSString *)reason {
+    if (!_isNetworkReachable) {
+        // network is not reachable don't even bother
         return;
     }
     
     DDLogVerbose(@"tryAutoResume(%@): stopped: %d, waitingForJob: %@", _name, _stopped, _waitingForJob);
     
-    if (!_stopped && _waitingForJob == nil) {
-        BOOL canAutoResume = TRUE;
-        if ([self.delegate respondsToSelector:@selector(offlineQueueShouldAutomaticallyResume:)]) {
-            canAutoResume = [self.delegate offlineQueueShouldAutomaticallyResume:self];
-        }
-        
-        DDLogVerbose(@"canAutoResume(%@): %d", _name, canAutoResume);
-        
-        if (canAutoResume) {
-            [self resume:@"auto resume"];
-        }
+    if  (_waitingForJob != nil) {
+        // when waiting for a job only finishJob can resume the queue
+        return;
     }
-}
 
-- (void)autoResumeTimerFired:(NSTimer*)timer {
-    [self tryAutoResume];
+    if  (_stopped) {
+        // if the queue is manually stop we can't auto resume
+        return;
+    }
+    
+    [self resume:reason];
 }
 
 #pragma mark - Queue control
@@ -218,7 +211,7 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 -(void)enqueueOperation {
-    DDLogVerbose(@"Adding operation to queue %@ suspended: %d", _name, _operationQueue.isSuspended);
+    DDLogVerbose(@"Adding operation to queue %@ suspended: %d, stopped: %d", _name, _isNetworkReachable, _stopped);
     [_operationQueue addOperationWithBlock:^{
         [self execute];
     }];
@@ -313,9 +306,17 @@ static NSMutableSet *_activeQueues = nil;
 
 - (void)waitForRetry {
     NSString *reason = [NSString stringWithFormat:@"Last task of %@ failed waiting for retry", _name];
-    DDLogError(@"Last task of %@ failed waiting for retry", _name);
+    DDLogWarn(@"Last task of %@ failed waiting for retry", _name);
     
     [self suspended:reason];
+    
+    double delayInSeconds = 15.0;
+    dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, delayInSeconds * NSEC_PER_SEC);
+    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+    dispatch_after(popTime, queue, ^{
+        NSString *reason = [NSString stringWithFormat:@"Retry task %@ after %g seconds", _name, delayInSeconds];
+        [self tryAutoResume:reason];
+    });
 }
 
 - (void)waitForJob:(task_id)jobId {
@@ -355,39 +356,6 @@ static NSMutableSet *_activeQueues = nil;
     }
     
     _operationQueue.suspended = NO;
-}
-
-- (NSTimeInterval)autoResumeInterval {
-    return _autoResumeInterval;
-}
-
-- (void)setAutoResumeInterval:(NSTimeInterval)newInterval
-{
-    if (_autoResumeInterval == newInterval) {
-        return;
-    }
-    
-    _autoResumeInterval = newInterval;
-    
-    // Ensure that this always runs on the main thread for simple timer scheduling
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @synchronized(self) {
-            if (_autoResumeTimer) {
-                [_autoResumeTimer invalidate];
-                _autoResumeTimer = nil;
-            }
-            
-            if (newInterval > 0) {
-                _autoResumeTimer = [NSTimer scheduledTimerWithTimeInterval:newInterval
-                                                                    target:self
-                                                                  selector:@selector(autoResumeTimerFired:)
-                                                                  userInfo:nil
-                                                                   repeats:YES];
-            } else {
-                _autoResumeTimer = nil;
-            }
-        }
-    });
 }
 
 - (void)items:(void (^)(NSDictionary *userInfo))callback {
@@ -449,7 +417,7 @@ static NSMutableSet *_activeQueues = nil;
 // this task has failed, need to be rerun
 // next time the queue will run again it will pop the task again
 -(void)taskFailed:(task_id)taskId error:(NSError *)error{
-    DDLogError(@"Task %lld failed", taskId);
+    DDLogWarn(@"Task %lld failed", taskId);
     
     [self resetWaitingTask:taskId error:error]; // TODO run in the proper queue
 }
@@ -541,15 +509,19 @@ static NSMutableSet *_activeQueues = nil;
         
         NSDictionary *userInfo = [self decodeTaskInfo:blobData];
         
-        IPOfflineQueueResult result = [self.delegate offlineQueue:self taskId:taskId executeActionWithUserInfo:userInfo];
-        if (result == IPOfflineQueueResultSuccess) {
-            [self deleteTask:taskId db:db];
-        } else if (result == IPOfflineQueueResultAsync) {
-            [self waitForJob:taskId]; // Stop queue wait for the user to tell us that the task has finish (or failed)
-        } else if (result == IPOfflineQueueResultFailureShouldRetry) {
-            [self waitForRetry]; // Stop the queue, wait for retry
-        }
-    }];
+        [_operationQueue addOperationWithBlock:^{
+            IPOfflineQueueResult result = [self.delegate offlineQueue:self taskId:taskId executeActionWithUserInfo:userInfo];
+            if (result == IPOfflineQueueResultSuccess) {
+                [self.dbQueue inDatabase:^(FMDatabase *db) {
+                    [self deleteTask:taskId db:db];
+                }];
+            } else if (result == IPOfflineQueueResultAsync) {
+                [self waitForJob:taskId]; // Stop queue wait for the user to tell us that the task has finish (or failed)
+            } else if (result == IPOfflineQueueResultFailureShouldRetry) {
+                [self waitForRetry]; // Stop the queue, wait for retry
+            }
+        }];
+    } async:YES];
 }
 
 - (NSDictionary *)decodeTaskInfo:(NSData *)blobData {
