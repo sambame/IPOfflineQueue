@@ -93,11 +93,13 @@ static NSMutableSet *_activeQueues = nil;
         
         if (stopped) {
             [self stop:@"inital state is stopped"];
-        } else {
-            [self start:@"inital state is started"];
         }
         
         [self openDB];
+        
+        if (!stopped) {
+            [self start:@"inital state is started"];
+        }
     }
     return self;
 }
