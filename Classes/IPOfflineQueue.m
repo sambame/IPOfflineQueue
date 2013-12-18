@@ -57,13 +57,16 @@ static NSMutableSet *_activeQueues = nil;
                 _activeQueues = [[NSMutableSet alloc] initWithObjects:name, nil];
             }
         }
+    
+        _name = name;
         
-        _dbQueue = [FMDatabaseQueue databaseQueueWithPath:[self dbFilePath]];
+        NSString *dbPath = [[self class] dbFilePath:name];
+        
+        _dbQueue = [FMDatabaseQueue databaseQueueWithPath:dbPath];
         
         self.autoResumeInterval = 0;
         self.delegate = d;
-        
-        _name = name;
+    
         
         _operationQueue = [[NSOperationQueue alloc] init];
         _operationQueue.name = name;
@@ -115,9 +118,9 @@ static NSMutableSet *_activeQueues = nil;
     [self close];
 }
 
--(NSString*)dbFilePath {
++(NSString*)dbFilePath:(NSString *)queueName {
     return [[NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) objectAtIndex:0] stringByAppendingPathComponent:
-            [NSString stringWithFormat:@"%@.queue", _name]];
+            [NSString stringWithFormat:@"%@.queue", queueName]];
 }
 
 -(void)closeDB {
