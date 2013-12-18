@@ -87,7 +87,7 @@ static NSMutableSet *_activeQueues = nil;
                                                               [self suspended:@"reachability"];
                                                           } else {
                                                               DDLogInfo(@"try resume queue %@ via reachability", _name);
-                                                              [self tryAutoResume:@"Notwork reachable again"];
+                                                              [self tryAutoResume:@"Network reachable again"];
                                                           }
                                                       }];
         
@@ -173,7 +173,7 @@ static NSMutableSet *_activeQueues = nil;
     }];
     
     if (!isNewQueue) {
-        [self recoverPendingTasks];
+        [self enqueueOperation];
     }
 }
 
@@ -329,7 +329,7 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 - (void)stop:(NSString *)reason {
-    DDLogInfo(@"stop queue %@ because of %@", _name, reason);
+    DDLogVerbose(@"stop queue %@ because of %@", _name, reason);
     
     _stopped = TRUE;
     [self suspended:reason];
@@ -343,7 +343,7 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 - (void)suspended:(NSString *)reason {
-    DDLogInfo(@"suspended queue %@ because of %@", _name, reason);
+    DDLogVerbose(@"suspended queue %@ because of %@", _name, reason);
     
     if ([self.delegate respondsToSelector:@selector(offlineQueueWillSuspend:)]) {
         [self.delegate offlineQueueWillSuspend:self];
@@ -352,11 +352,15 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 - (void)resume:(NSString *)reason {
-    DDLogInfo(@"resume queue %@ because of %@, %d tasks in queue", _name, reason, (int)_operationQueue.operationCount);
+    int pendingJobs = [self pendingJobs];
+    
+    DDLogVerbose(@"resume queue %@ because of %@, %d tasks in queue", _name, reason, pendingJobs);
     
     if ([self.delegate respondsToSelector:@selector(offlineQueueWillResume:)]) {
         [self.delegate offlineQueueWillResume:self];
     }
+    
+    [self enqueueOperation];
     
     _operationQueue.suspended = NO;
 }
@@ -380,7 +384,9 @@ static NSMutableSet *_activeQueues = nil;
     return _operationQueue.operationCount;
 }
 
--(void)recoverPendingTasks {
+-(int)pendingJobs {
+    __block int pendingJobs = 0;
+    
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT COUNT(*) FROM %@", TABLE_NAME]];
         
@@ -399,7 +405,6 @@ static NSMutableSet *_activeQueues = nil;
                                    userInfo:nil] raise];
         }
         
-        int pendingJobs = 0;
         BOOL hasData = [rs next];
         if (hasData) {
             pendingJobs = [rs intForColumnIndex:0];
@@ -407,15 +412,12 @@ static NSMutableSet *_activeQueues = nil;
         
         [rs close];
         
-        DDLogInfo(@"Queue %@ have %d pending jobs", _name, pendingJobs);
-        
-        if (pendingJobs > 0) {
-            for (int i=0;i<pendingJobs;i++) {
-                [self enqueueOperation];
-            }
-        }
+        DDLogVerbose(@"Queue %@ has %d pending jobs", _name, pendingJobs);
     }];
+    
+    return pendingJobs;
 }
+
 
 // this task has failed, need to be rerun
 // next time the queue will run again it will pop the task again
@@ -425,13 +427,22 @@ static NSMutableSet *_activeQueues = nil;
     [self resetWaitingTask:taskId error:error]; // TODO run in the proper queue
 }
 
--(void)finishTask:(task_id)taskId {
-    DDLogInfo(@"Task %llu finished", taskId);
+-(void)finishTask:(task_id)taskId db:(FMDatabase *)db{
+    DDLogVerbose(@"Task %llu finished", taskId);
     
-    [self.dbQueue inDatabase:^(FMDatabase *db) {
+    if (db == nil) {
+        [self.dbQueue inDatabase:^(FMDatabase *db) {
+            [self deleteTask:taskId db:db];
+        }];
+    } else {
         [self deleteTask:taskId db:db];
-        [self resume:@"resume after async task finished"];
-    }];
+    }
+    
+    [self resume:[NSString stringWithFormat:@"resume after async task %llu finished", taskId]];
+}
+
+-(void)finishTask:(task_id)taskId {
+    [self finishTask:taskId db:nil];
 }
 
 -(void)resetWaitingTask:(task_id)taskId error:(NSError *)error {
@@ -512,19 +523,15 @@ static NSMutableSet *_activeQueues = nil;
         
         NSDictionary *userInfo = [self decodeTaskInfo:blobData];
         
-        [_operationQueue addOperationWithBlock:^{
-            IPOfflineQueueResult result = [self.delegate offlineQueue:self taskId:taskId executeActionWithUserInfo:userInfo];
-            if (result == IPOfflineQueueResultSuccess) {
-                [self.dbQueue inDatabase:^(FMDatabase *db) {
-                    [self deleteTask:taskId db:db];
-                }];
-            } else if (result == IPOfflineQueueResultAsync) {
-                [self waitForJob:taskId]; // Stop queue wait for the user to tell us that the task has finish (or failed)
-            } else if (result == IPOfflineQueueResultFailureShouldRetry) {
-                [self waitForRetry]; // Stop the queue, wait for retry
-            }
-        }];
-    } async:YES];
+        IPOfflineQueueResult result = [self.delegate offlineQueue:self taskId:taskId executeActionWithUserInfo:userInfo];
+        if (result == IPOfflineQueueResultSuccess) {
+            [self finishTask:taskId db:db];
+        } else if (result == IPOfflineQueueResultAsync) {
+            [self waitForJob:taskId]; // Stop queue wait for the user to tell us that the task has finish (or failed)
+        } else if (result == IPOfflineQueueResultFailureShouldRetry) {
+            [self waitForRetry]; // Stop the queue, wait for retry
+        }
+    }];
 }
 
 - (NSDictionary *)decodeTaskInfo:(NSData *)blobData {
