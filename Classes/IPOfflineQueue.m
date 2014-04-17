@@ -7,12 +7,7 @@
 #import "Reachability.h"
 #import "DDLog.h"
 
-// Log levels: off, error, warn, info, verbose
-#if DEBUG
 static const int ddLogLevel = LOG_LEVEL_INFO;
-#else
-static const int ddLogLevel = LOG_LEVEL_WARN;
-#endif
 
 static NSMutableSet *_activeQueues = nil;
 
