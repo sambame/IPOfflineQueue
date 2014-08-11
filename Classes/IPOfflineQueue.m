@@ -522,7 +522,7 @@ static NSMutableSet *_activeQueues = nil;
         
         sqlite_uint64 taskId = 0;
         NSData *blobData;
-        NSInteger retry;
+        unsigned long long int retry;
         
         NSString *sql = [NSString stringWithFormat:@"SELECT taskid, params, retry FROM %@ ORDER BY taskid LIMIT 1", TABLE_NAME];
         FMResultSet *rs = [db executeQuery:sql];
