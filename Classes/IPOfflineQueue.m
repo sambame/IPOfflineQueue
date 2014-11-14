@@ -7,12 +7,16 @@
 #import "Reachability.h"
 #import "DDLog.h"
 
+// Log levels: off, error, warn, info, verbose
+#if DEBUG
 static const int ddLogLevel = LOG_LEVEL_INFO;
+#else
+static const int ddLogLevel = LOG_LEVEL_WARN;
+#endif
 
 static NSMutableSet *_activeQueues = nil;
 
-#define PREV_TABLE_NAME @"queue2"
-#define TABLE_NAME @"queue3"
+#define TABLE_NAME @"queue2"
 #define BUSY_RETRY_TIMEOUT 50
 
 @interface IPOfflineQueue() {
@@ -129,77 +133,42 @@ static NSMutableSet *_activeQueues = nil;
     return _dbQueue;
 }
 
--(BOOL)tableExistsInDb:(FMDatabase *)db tableName:(NSString *)tableName {
-    FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '%@'", tableName]];
-    
-    int existingTables = [rs next] ? [rs intForColumnIndex:0] : 0;
-    [rs close];
-    
-    return existingTables ? TRUE : FALSE;
-}
-
--(BOOL)renameTableInDb:(FMDatabase *)db from:(NSString *)fromTable {
-    return [db executeUpdate:[NSString stringWithFormat:@"ALTER TABLE %@ RENAME TO %@", fromTable, TABLE_NAME]];
-}
-
--(BOOL)tryToAddRetryColumnInDb:(FMDatabase *)db {
-    return [db executeUpdate:[NSString stringWithFormat:@"ALTER TABLE %@ ADD COLUMN retry INTEGER DEFAULT 0", TABLE_NAME]];
-}
-
--(BOOL)tryUpgradeTable:(FMDatabase *)db {
-    BOOL existingTable = [self tableExistsInDb:db tableName:PREV_TABLE_NAME];
-    
-    if (!existingTable) {
-        return FALSE;
-    }
-    
-    if (![self renameTableInDb:db from:PREV_TABLE_NAME]) {
-        return FALSE;
-    }
-    
-    return [self tryToAddRetryColumnInDb:db];
-}
-
--(void)createTableInDb:(FMDatabase *)db {
-    DDLogInfo(@"[IPOfflineQueue] Creating new schema");
-    
-    NSString *sql = [NSString stringWithFormat:@"CREATE TABLE %@ (taskid INTEGER PRIMARY KEY AUTOINCREMENT, retry INTERGER DEFAULT 0, params BLOB NOT NULL)", TABLE_NAME];
-    NSError *error;
-    BOOL created = [db update:sql withErrorAndBindings:&error];
-    
-    if (created == FALSE) {
-        DDLogCritical(@"CRITICAL: Failed to create schema %@", error);
-        
-        NSDictionary *userInfo;
-        
-        if (error) {
-            userInfo = @{@"error": error};
-        }
-        
-        [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
-                                 reason:@"Failed to create schema"
-                               userInfo:userInfo]
-         raise];
-    }
-    
-    [self clear];
-}
-
 -(void)openDB {
     DDLogInfo(@"Is SQLite compiled with it's thread safe options turned on? %@!", [FMDatabase isSQLiteThreadSafe] ? @"Yes" : @"No");
+
     
     __block bool isNewQueue = YES;
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         db.logsErrors = YES;
         
-        BOOL existingTables = [self tableExistsInDb:db tableName:TABLE_NAME];
+        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '%@'", TABLE_NAME]];
         
-        if (!existingTables) {
-            existingTables = [self tryUpgradeTable:db];
-        }
+        int existingTables = [rs next] ? [rs intForColumnIndex:0] : 0;
+        [rs close];
         
-        if (!existingTables) {
-            [self createTableInDb:db];
+        if (existingTables < 1) {
+            DDLogInfo(@"[IPOfflineQueue] Creating new schema");
+            
+            NSString *sql = [NSString stringWithFormat:@"CREATE TABLE %@ (taskid INTEGER PRIMARY KEY AUTOINCREMENT, params BLOB NOT NULL)", TABLE_NAME];
+            NSError *error;
+            BOOL created = [db executeUpdate:sql withErrorAndBindings:&error];
+            
+            if (created == FALSE) {
+                DDLogCritical(@"CRITICAL: Failed to create schema %@", error);
+                
+                NSDictionary *userInfo;
+                
+                if (error) {
+                    userInfo = @{@"error": error};
+                }
+                
+                [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
+                                         reason:@"Failed to create schema"
+                                       userInfo:userInfo]
+                 raise];
+            }
+            
+            [self clear];
         } else {
             isNewQueue = NO;
         };
@@ -257,7 +226,7 @@ static NSMutableSet *_activeQueues = nil;
 {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         [self backgroundTaskBlock:^{
-            db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
+            db.maxBusyRetryTimeInterval=BUSY_RETRY_TIMEOUT;
             NSMutableData *data = [[NSMutableData alloc] init];
             NSKeyedArchiver *archiver = [[NSKeyedArchiver alloc] initForWritingWithMutableData:data];
             [archiver encodeObject:userInfo forKey:@"userInfo"];
@@ -265,7 +234,7 @@ static NSMutableSet *_activeQueues = nil;
             
             NSError *error;
             NSString *sql = [NSString stringWithFormat:@"INSERT INTO %@ (params) VALUES (?)", TABLE_NAME];
-            BOOL inserted = [db update:sql withErrorAndBindings:&error, data];
+            BOOL inserted = [db executeUpdate:sql withErrorAndBindings:&error, data];
             
             if (inserted == FALSE) {
                 DDLogCritical(@"CRITICAL: Failed to insert task table %@", error);
@@ -317,10 +286,10 @@ static NSMutableSet *_activeQueues = nil;
     [self backgroundTaskBlock:^{
         [_operationQueue cancelAllOperations];
         [self.dbQueue inDatabase:^(FMDatabase *db) {
-            db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
+            db.maxBusyRetryTimeInterval = BUSY_RETRY_TIMEOUT;
             NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME];
             NSError *error;
-            BOOL deleted = [db update:sql withErrorAndBindings:&error];
+            BOOL deleted = [db executeUpdate:sql withErrorAndBindings:&error];
             
             if (deleted == FALSE) {
                 DDLogCritical(@"CRITICAL: Failed to delete all queued items %@", error);
@@ -493,10 +462,10 @@ static NSMutableSet *_activeQueues = nil;
 
 -(void)deleteTask:(task_id)taskId db:(FMDatabase *)db {
     [self backgroundTaskBlock:^{
-        db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
+        db.maxBusyRetryTimeInterval = BUSY_RETRY_TIMEOUT;
         NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@ WHERE taskid = ?", TABLE_NAME];
         NSError *error;
-        BOOL deleted = [db update:sql withErrorAndBindings:&error, [NSNumber numberWithUnsignedLongLong:taskId]];
+        BOOL deleted = [db executeUpdate:sql withErrorAndBindings:&error, [NSNumber numberWithUnsignedLongLong:taskId]];
         
         if (deleted == FALSE) {
             DDLogCritical(@"CRITICAL: Failed to delete queued item after execution %@", error);
@@ -522,9 +491,8 @@ static NSMutableSet *_activeQueues = nil;
         
         sqlite_uint64 taskId = 0;
         NSData *blobData;
-        unsigned long long int retry;
         
-        NSString *sql = [NSString stringWithFormat:@"SELECT taskid, params, retry FROM %@ ORDER BY taskid LIMIT 1", TABLE_NAME];
+        NSString *sql = [NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid LIMIT 1", TABLE_NAME];
         FMResultSet *rs = [db executeQuery:sql];
         
         if (rs == nil) {
@@ -545,7 +513,6 @@ static NSMutableSet *_activeQueues = nil;
         if (hasData) {
             taskId = [rs unsignedLongLongIntForColumnIndex:0];
             blobData = [rs dataForColumnIndex:1];
-            retry = [rs unsignedLongLongIntForColumnIndex:2];
         }
         
         [rs close];
@@ -556,10 +523,7 @@ static NSMutableSet *_activeQueues = nil;
             return;
         }
         
-        NSMutableDictionary *userInfo = [[self decodeTaskInfo:blobData] mutableCopy];
-        userInfo[@"retry"] = [NSNumber numberWithInteger:retry];
-        
-        [db executeUpdate:[NSString stringWithFormat:@"update %@ set retry=retry+1 where taskid=%llu", TABLE_NAME, taskId]];
+        NSDictionary *userInfo = [self decodeTaskInfo:blobData];
         
         IPOfflineQueueResult result = [self.delegate offlineQueue:self taskId:taskId executeActionWithUserInfo:userInfo];
         if (result == IPOfflineQueueResultSuccess) {
