@@ -168,7 +168,10 @@ static NSMutableSet *_activeQueues = nil;
                  raise];
             }
             
-            [self clear];
+            __block IPOfflineQueue* __blockself = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [__blockself clear];
+            });
         } else {
             isNewQueue = NO;
         };
