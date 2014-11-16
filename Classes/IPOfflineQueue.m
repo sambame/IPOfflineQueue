@@ -53,7 +53,7 @@ static NSMutableSet *_activeQueues = nil;
                 _activeQueues = [[NSMutableSet alloc] initWithObjects:name, nil];
             }
         }
-    
+        
         _name = name;
         
         NSString *dbPath = [[self class] dbFilePath:name];
@@ -62,7 +62,7 @@ static NSMutableSet *_activeQueues = nil;
         
         self.autoResumeInterval = 0;
         self.delegate = d;
-    
+        
         
         _operationQueue = [[NSOperationQueue alloc] init];
         _operationQueue.name = name;
@@ -73,11 +73,11 @@ static NSMutableSet *_activeQueues = nil;
                                                            queue:[NSOperationQueue currentQueue]
                                                       usingBlock:^(NSNotification *aNotification) {
                                                           Reachability *reachability = aNotification.object;
-                                                              
+                                                          
                                                           NetworkStatus remoteHostStatus = reachability.currentReachabilityStatus;
-                                                      
+                                                          
                                                           _isNetworkReachable = remoteHostStatus != NotReachable;
-                                                      
+                                                          
                                                           if (remoteHostStatus == NotReachable) {
                                                               DDLogInfo(@"suspend queue %@ via reachability", _name);
                                                               [self suspended:@"reachability"];
@@ -165,7 +165,7 @@ static NSMutableSet *_activeQueues = nil;
     
     NSString *sql = [NSString stringWithFormat:@"CREATE TABLE %@ (taskid INTEGER PRIMARY KEY AUTOINCREMENT, retry INTERGER DEFAULT 0, params BLOB NOT NULL)", TABLE_NAME];
     NSError *error;
-    BOOL created = [db update:sql withErrorAndBindings:&error];
+    BOOL created = [db executeUpdate:sql withErrorAndBindings:&error];
     
     if (created == FALSE) {
         DDLogCritical(@"CRITICAL: Failed to create schema %@", error);
@@ -182,7 +182,10 @@ static NSMutableSet *_activeQueues = nil;
          raise];
     }
     
-    [self clear];
+    __block IPOfflineQueue* __blockself = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [__blockself clear];
+    });
 }
 
 -(void)openDB {
@@ -222,7 +225,7 @@ static NSMutableSet *_activeQueues = nil;
         // when waiting for a job only finishJob can resume the queue
         return;
     }
-
+    
     if  (_stopped) {
         // if the queue is manually stop we can't auto resume
         return;
