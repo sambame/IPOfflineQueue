@@ -181,7 +181,8 @@ static NSMutableSet *_activeQueues = nil;
                                userInfo:userInfo]
          raise];
     }
-    
+    //When creating a new queue we should clear the queue on a different cycle
+    //Otherwise it will crash on reentrant to the same queue on the same context.
     __block IPOfflineQueue* __blockself = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         [__blockself clear];
