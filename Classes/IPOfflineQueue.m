@@ -560,7 +560,7 @@ static NSMutableSet *_activeQueues = nil;
         }
         
         NSMutableDictionary *userInfo = [[self decodeTaskInfo:blobData] mutableCopy];
-        userInfo[@"retry"] = [NSNumber numberWithInteger:retry];
+        userInfo[@"retry"] = [NSNumber numberWithUnsignedLongLong:retry];
         
         [db executeUpdate:[NSString stringWithFormat:@"update %@ set retry=retry+1 where taskid=%llu", TABLE_NAME, taskId]];
         
