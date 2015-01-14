@@ -53,7 +53,7 @@ static NSMutableSet *_activeQueues = nil;
                 _activeQueues = [[NSMutableSet alloc] initWithObjects:name, nil];
             }
         }
-    
+        
         _name = name;
         
         NSString *dbPath = [[self class] dbFilePath:name];
@@ -62,7 +62,7 @@ static NSMutableSet *_activeQueues = nil;
         
         self.autoResumeInterval = 0;
         self.delegate = d;
-    
+        
         
         _operationQueue = [[NSOperationQueue alloc] init];
         _operationQueue.name = name;
@@ -73,11 +73,11 @@ static NSMutableSet *_activeQueues = nil;
                                                            queue:[NSOperationQueue currentQueue]
                                                       usingBlock:^(NSNotification *aNotification) {
                                                           Reachability *reachability = aNotification.object;
-                                                              
+                                                          
                                                           NetworkStatus remoteHostStatus = reachability.currentReachabilityStatus;
-                                                      
+                                                          
                                                           _isNetworkReachable = remoteHostStatus != NotReachable;
-                                                      
+                                                          
                                                           if (remoteHostStatus == NotReachable) {
                                                               DDLogInfo(@"suspend queue %@ via reachability", _name);
                                                               [self suspended:@"reachability"];
@@ -165,7 +165,7 @@ static NSMutableSet *_activeQueues = nil;
     
     NSString *sql = [NSString stringWithFormat:@"CREATE TABLE %@ (taskid INTEGER PRIMARY KEY AUTOINCREMENT, retry INTERGER DEFAULT 0, params BLOB NOT NULL)", TABLE_NAME];
     NSError *error;
-    BOOL created = [db update:sql withErrorAndBindings:&error];
+    BOOL created = [db executeUpdate:sql withErrorAndBindings:&error];
     
     if (created == FALSE) {
         DDLogCritical(@"CRITICAL: Failed to create schema %@", error);
@@ -181,8 +181,12 @@ static NSMutableSet *_activeQueues = nil;
                                userInfo:userInfo]
          raise];
     }
-    
-    [self clear];
+    //When creating a new queue we should clear the queue on a different cycle
+    //Otherwise it will crash on reentrant to the same queue on the same context.
+    __block IPOfflineQueue* __blockself = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [__blockself clear];
+    });
 }
 
 -(void)openDB {
@@ -222,7 +226,7 @@ static NSMutableSet *_activeQueues = nil;
         // when waiting for a job only finishJob can resume the queue
         return;
     }
-
+    
     if  (_stopped) {
         // if the queue is manually stop we can't auto resume
         return;
@@ -257,7 +261,7 @@ static NSMutableSet *_activeQueues = nil;
 {
     [self.dbQueue inDatabase:^(FMDatabase *db) {
         [self backgroundTaskBlock:^{
-            db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
+            db.maxBusyRetryTimeInterval=BUSY_RETRY_TIMEOUT;
             NSMutableData *data = [[NSMutableData alloc] init];
             NSKeyedArchiver *archiver = [[NSKeyedArchiver alloc] initForWritingWithMutableData:data];
             [archiver encodeObject:userInfo forKey:@"userInfo"];
@@ -265,7 +269,7 @@ static NSMutableSet *_activeQueues = nil;
             
             NSError *error;
             NSString *sql = [NSString stringWithFormat:@"INSERT INTO %@ (params) VALUES (?)", TABLE_NAME];
-            BOOL inserted = [db update:sql withErrorAndBindings:&error, data];
+            BOOL inserted = [db executeUpdate:sql withErrorAndBindings:&error, data];
             
             if (inserted == FALSE) {
                 DDLogCritical(@"CRITICAL: Failed to insert task table %@", error);
@@ -317,10 +321,10 @@ static NSMutableSet *_activeQueues = nil;
     [self backgroundTaskBlock:^{
         [_operationQueue cancelAllOperations];
         [self.dbQueue inDatabase:^(FMDatabase *db) {
-            db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
+            db.maxBusyRetryTimeInterval = BUSY_RETRY_TIMEOUT;
             NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME];
             NSError *error;
-            BOOL deleted = [db update:sql withErrorAndBindings:&error];
+            BOOL deleted = [db executeUpdate:sql withErrorAndBindings:&error];
             
             if (deleted == FALSE) {
                 DDLogCritical(@"CRITICAL: Failed to delete all queued items %@", error);
@@ -493,10 +497,10 @@ static NSMutableSet *_activeQueues = nil;
 
 -(void)deleteTask:(task_id)taskId db:(FMDatabase *)db {
     [self backgroundTaskBlock:^{
-        db.busyRetryTimeout = BUSY_RETRY_TIMEOUT;
+        db.maxBusyRetryTimeInterval = BUSY_RETRY_TIMEOUT;
         NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@ WHERE taskid = ?", TABLE_NAME];
         NSError *error;
-        BOOL deleted = [db update:sql withErrorAndBindings:&error, [NSNumber numberWithUnsignedLongLong:taskId]];
+        BOOL deleted = [db executeUpdate:sql withErrorAndBindings:&error, [NSNumber numberWithUnsignedLongLong:taskId]];
         
         if (deleted == FALSE) {
             DDLogCritical(@"CRITICAL: Failed to delete queued item after execution %@", error);
@@ -557,7 +561,7 @@ static NSMutableSet *_activeQueues = nil;
         }
         
         NSMutableDictionary *userInfo = [[self decodeTaskInfo:blobData] mutableCopy];
-        userInfo[@"retry"] = [NSNumber numberWithInteger:retry];
+        userInfo[@"retry"] = [NSNumber numberWithUnsignedLongLong:retry];
         
         [db executeUpdate:[NSString stringWithFormat:@"update %@ set retry=retry+1 where taskid=%llu", TABLE_NAME, taskId]];
         
