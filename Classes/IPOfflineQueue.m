@@ -24,6 +24,8 @@ static NSMutableSet *_activeQueues = nil;
     
     NSNumber *_waitingForJob;
     NSDate *_waitingJobStartTime;
+    
+    UIBackgroundTaskIdentifier _backgroundTaskId;
 }
 @end
 
@@ -55,7 +57,7 @@ static NSMutableSet *_activeQueues = nil;
         }
         
         _name = name;
-        
+        _backgroundTaskId = UIBackgroundTaskInvalid;
         NSString *dbPath = [[self class] dbFilePath:name];
         
         _dbQueue = [FMDatabaseQueue databaseQueueWithPath:dbPath];
@@ -489,8 +491,11 @@ static NSMutableSet *_activeQueues = nil;
         } else {
             DDLogInfo(@"Task %llu finished total time %f seconds", taskId, -[_waitingJobStartTime timeIntervalSinceNow]);
         }
+        
         _waitingForJob = nil;
         _waitingJobStartTime = nil;
+        
+        [self endBackgroundUpdateTask];
     }
 }
 
@@ -519,6 +524,17 @@ static NSMutableSet *_activeQueues = nil;
         
         [self resetWaitingTask:taskId error:nil];
     }];
+}
+
+-(void)endBackgroundUpdateTask {
+    if (_backgroundTaskId == UIBackgroundTaskInvalid) {
+        return;
+    }
+    
+    [[UIApplication sharedApplication] endBackgroundTask:_backgroundTaskId];
+    _backgroundTaskId = UIBackgroundTaskInvalid;
+    
+    NSLog(@"Finish background task");
 }
 
 - (void)execute {
@@ -557,10 +573,31 @@ static NSMutableSet *_activeQueues = nil;
         BOOL isEmpty = hasData == FALSE;
         
         if (isEmpty) {
+            [self endBackgroundUpdateTask];
             return;
         }
         
         NSMutableDictionary *userInfo = [[self decodeTaskInfo:blobData] mutableCopy];
+        
+        if ([userInfo[@"@background"] boolValue]) {
+            NSString *taskName = [NSString stringWithFormat:@"offlineQueue %@ Task %llu (%llu)", _name, taskId, retry];
+            
+#ifdef _DEBUG
+            NSLog(@"Task %@ will also run during background", taskName);
+#endif
+            if (_backgroundTaskId == UIBackgroundTaskInvalid) {
+                _backgroundTaskId = [[UIApplication sharedApplication] beginBackgroundTaskWithName:taskName expirationHandler:^{
+                    [self endBackgroundUpdateTask];
+                }];
+            } else {
+#ifdef _DEBUG
+                NSLog(@"Task %@ will continue on the previous background task", taskName);
+#endif
+            }
+        } else {
+            [self endBackgroundUpdateTask];
+        }
+        
         userInfo[@"retry"] = [NSNumber numberWithUnsignedLongLong:retry];
         
         [db executeUpdate:[NSString stringWithFormat:@"update %@ set retry=retry+1 where taskid=%llu", TABLE_NAME, taskId]];
@@ -571,6 +608,7 @@ static NSMutableSet *_activeQueues = nil;
         } else if (result == IPOfflineQueueResultAsync) {
             [self waitForJob:taskId]; // Stop queue wait for the user to tell us that the task has finish (or failed)
         } else if (result == IPOfflineQueueResultFailureShouldRetry) {
+            [self endBackgroundUpdateTask];
             [self waitForRetry]; // Stop the queue, wait for retry
         }
     }];
