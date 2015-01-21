@@ -183,12 +183,8 @@ static NSMutableSet *_activeQueues = nil;
                                userInfo:userInfo]
          raise];
     }
-    //When creating a new queue we should clear the queue on a different cycle
-    //Otherwise it will crash on reentrant to the same queue on the same context.
-    __block IPOfflineQueue* __blockself = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [__blockself clear];
-    });
+    
+    [self clearFromDB:db];
 }
 
 -(void)openDB {
@@ -319,34 +315,42 @@ static NSMutableSet *_activeQueues = nil;
     }];
 }
 
-- (void)clear {
+- (void)clearFromDB:(FMDatabase *)db {
+    void (^clearBlock)(FMDatabase *db) = ^(FMDatabase *db) {
+        db.maxBusyRetryTimeInterval = BUSY_RETRY_TIMEOUT;
+        NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME];
+        NSError *error;
+        BOOL deleted = [db executeUpdate:sql withErrorAndBindings:&error];
+        
+        if (deleted == FALSE) {
+            DDLogCritical(@"CRITICAL: Failed to delete all queued items %@", error);
+            
+            NSDictionary *userInfo;
+            
+            if (error) {
+                userInfo = @{@"error": error};
+            }
+            
+            [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
+                                     reason:@"Failed to delete all queued items"
+                                   userInfo:userInfo]
+             raise];
+        }
+    };
+
     [self backgroundTaskBlock:^{
         [_operationQueue cancelAllOperations];
-        [self.dbQueue inDatabase:^(FMDatabase *db) {
-            db.maxBusyRetryTimeInterval = BUSY_RETRY_TIMEOUT;
-            NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME];
-            NSError *error;
-            BOOL deleted = [db executeUpdate:sql withErrorAndBindings:&error];
-            
-            if (deleted == FALSE) {
-                DDLogCritical(@"CRITICAL: Failed to delete all queued items %@", error);
-                
-                NSDictionary *userInfo;
-                
-                if (error) {
-                    userInfo = @{@"error": error};
-                }
-                
-                [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
-                                         reason:@"Failed to delete all queued items"
-                                       userInfo:userInfo]
-                 raise];
-            }
-        }];
+        [self openScopeIfNeeded:db andExecute:clearBlock];
     }];
 }
 
+- (void)clear {
+    [self clearFromDB:nil];
+}
+
 - (void)waitForRetry {
+    [self endBackgroundUpdateTask];
+    
     NSString *reason = [NSString stringWithFormat:@"Last task of %@ failed waiting for retry", _name];
     DDLogWarn(@"Last task of %@ failed waiting for retry", _name);
     
@@ -390,18 +394,27 @@ static NSMutableSet *_activeQueues = nil;
     _operationQueue.suspended = YES;
 }
 
-- (void)resume:(NSString *)reason {
-    int pendingJobs = [self pendingJobs];
+
+- (void)resume:(NSString *)reason db:(FMDatabase *)db {
+    void (^resumeBlock)(FMDatabase *db) = ^(FMDatabase *db) {
+        int pendingJobs = [self pendingJobs:db];
+        
+        DDLogVerbose(@"resume queue %@ because of %@, %d tasks in queue", _name, reason, pendingJobs);
+        
+        if ([self.delegate respondsToSelector:@selector(offlineQueueWillResume:)]) {
+            [self.delegate offlineQueueWillResume:self];
+        }
+        
+        [self enqueueOperation];
+        
+        _operationQueue.suspended = NO;
+    };
     
-    DDLogVerbose(@"resume queue %@ because of %@, %d tasks in queue", _name, reason, pendingJobs);
-    
-    if ([self.delegate respondsToSelector:@selector(offlineQueueWillResume:)]) {
-        [self.delegate offlineQueueWillResume:self];
-    }
-    
-    [self enqueueOperation];
-    
-    _operationQueue.suspended = NO;
+    [self openScopeIfNeeded:db andExecute:resumeBlock];
+}
+
+- (void)resume:(NSString *)reason  {
+    [self resume:reason db:nil];
 }
 
 - (void)items:(void (^)(NSDictionary *userInfo))callback {
@@ -423,36 +436,34 @@ static NSMutableSet *_activeQueues = nil;
     return _operationQueue.operationCount;
 }
 
--(int)pendingJobs {
-    __block int pendingJobs = 0;
+-(int)pendingJobs:(FMDatabase *)db {
+    int pendingJobs = 0;
     
-    [self.dbQueue inDatabase:^(FMDatabase *db) {
-        FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT COUNT(*) FROM %@", TABLE_NAME]];
+    FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT COUNT(*) FROM %@", TABLE_NAME]];
+    
+    if (rs == nil) {
+        NSDictionary *userInfo = @{@"code": [NSNumber numberWithInt:[db lastErrorCode]], @"message": [db lastErrorMessage]};
         
-        if (rs == nil) {
-            NSDictionary *userInfo = @{@"code": [NSNumber numberWithInt:[db lastErrorCode]], @"message": [db lastErrorMessage]};
-            
-            NSError *error = [NSError errorWithDomain:@"sqlite"
-                                                 code:[db lastErrorCode]
-                                             userInfo:userInfo];
-            
-            DDLogCritical(@"CRITICAL: Failed to get amount of pending jobs %@", error);
-            
-            
-            [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
-                                     reason:@"Failed to get amount of pending jobs"
-                                   userInfo:nil] raise];
-        }
+        NSError *error = [NSError errorWithDomain:@"sqlite"
+                                             code:[db lastErrorCode]
+                                         userInfo:userInfo];
         
-        BOOL hasData = [rs next];
-        if (hasData) {
-            pendingJobs = [rs intForColumnIndex:0];
-        }
+        DDLogCritical(@"CRITICAL: Failed to get amount of pending jobs %@", error);
         
-        [rs close];
         
-        DDLogVerbose(@"Queue %@ has %d pending jobs", _name, pendingJobs);
-    }];
+        [[NSException exceptionWithName:@"IPOfflineQueueDatabaseException"
+                                 reason:@"Failed to get amount of pending jobs"
+                               userInfo:nil] raise];
+    }
+    
+    BOOL hasData = [rs next];
+    if (hasData) {
+        pendingJobs = [rs intForColumnIndex:0];
+    }
+    
+    [rs close];
+    
+    DDLogVerbose(@"Queue %@ has %d pending jobs", _name, pendingJobs);
     
     return pendingJobs;
 }
@@ -466,18 +477,24 @@ static NSMutableSet *_activeQueues = nil;
     [self resetWaitingTask:taskId error:error]; // TODO run in the proper queue
 }
 
--(void)finishTask:(task_id)taskId db:(FMDatabase *)db{
+-(void)openScopeIfNeeded:(FMDatabase *)db andExecute:(void (^)(FMDatabase *db))block {
+    if (db == nil) {
+        [self.dbQueue inDatabase:block];
+    } else {
+        block(db);
+    }
+}
+
+-(void)finishTask:(task_id)taskId db:(FMDatabase *)db {
     DDLogVerbose(@"Task %llu finished", taskId);
     
-    if (db == nil) {
-        [self.dbQueue inDatabase:^(FMDatabase *db) {
-            [self deleteTask:taskId db:db];
-        }];
-    } else {
+    void (^deleteAndResumeBlock)(FMDatabase *db) = ^(FMDatabase *db) {
+        NSString *reason = [NSString stringWithFormat:@"resume after async task %llu finished", taskId];
         [self deleteTask:taskId db:db];
-    }
+        [self resume:reason db:db];
+    };
     
-    [self resume:[NSString stringWithFormat:@"resume after async task %llu finished", taskId]];
+    [self openScopeIfNeeded:db andExecute:deleteAndResumeBlock];
 }
 
 -(void)finishTask:(task_id)taskId {
@@ -608,7 +625,6 @@ static NSMutableSet *_activeQueues = nil;
         } else if (result == IPOfflineQueueResultAsync) {
             [self waitForJob:taskId]; // Stop queue wait for the user to tell us that the task has finish (or failed)
         } else if (result == IPOfflineQueueResultFailureShouldRetry) {
-            [self endBackgroundUpdateTask];
             [self waitForRetry]; // Stop the queue, wait for retry
         }
     }];
