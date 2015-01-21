@@ -184,14 +184,36 @@ static NSMutableSet *_activeQueues = nil;
          raise];
     }
     
-    [self clearFromDB:db];
+    [self clear];
+}
+
+-(void)inDatabaseScope:(void (^)(FMDatabase *db))block {
+    NSString *keyName = [NSString stringWithFormat:@"dbqueue_%p", self.dbQueue];
+    
+    FMDatabase *threadDB = [NSThread currentThread].threadDictionary[keyName];
+    
+    if (threadDB) {
+        block(threadDB);
+        return;
+    }
+    
+    [self.dbQueue inDatabase:^(FMDatabase *db) {
+        [NSThread currentThread].threadDictionary[keyName] = db;
+        
+        @try {
+            block(db);
+        }
+        @finally {
+            [[NSThread currentThread].threadDictionary removeObjectForKey:keyName];
+        }
+    }];
 }
 
 -(void)openDB {
     DDLogInfo(@"Is SQLite compiled with it's thread safe options turned on? %@!", [FMDatabase isSQLiteThreadSafe] ? @"Yes" : @"No");
     
     __block bool isNewQueue = YES;
-    [self.dbQueue inDatabase:^(FMDatabase *db) {
+    [self inDatabaseScope:^(FMDatabase *db) {
         db.logsErrors = YES;
         
         BOOL existingTables = [self tableExistsInDb:db tableName:TABLE_NAME];
@@ -257,7 +279,7 @@ static NSMutableSet *_activeQueues = nil;
 
 -(void)enqueueActionWithUserInfo:(NSDictionary *)userInfo
 {
-    [self.dbQueue inDatabase:^(FMDatabase *db) {
+    [self inDatabaseScope:^(FMDatabase *db) {
         [self backgroundTaskBlock:^{
             db.maxBusyRetryTimeInterval=BUSY_RETRY_TIMEOUT;
             NSMutableData *data = [[NSMutableData alloc] init];
@@ -297,7 +319,7 @@ static NSMutableSet *_activeQueues = nil;
     // With this simple, quick-and-dirty method, you can e.g. delete any existing "update" requests before
     // adding a new one.
     
-    [self.dbQueue inDatabase:^(FMDatabase *db) {
+    [self inDatabaseScope:^(FMDatabase *db) {
         FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT taskid, params FROM %@ ORDER BY taskid", TABLE_NAME]];
         
         while ([rs next]) {
@@ -315,7 +337,7 @@ static NSMutableSet *_activeQueues = nil;
     }];
 }
 
-- (void)clearFromDB:(FMDatabase *)db {
+- (void)clear {
     void (^clearBlock)(FMDatabase *db) = ^(FMDatabase *db) {
         db.maxBusyRetryTimeInterval = BUSY_RETRY_TIMEOUT;
         NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@", TABLE_NAME];
@@ -337,15 +359,11 @@ static NSMutableSet *_activeQueues = nil;
              raise];
         }
     };
-
+    
     [self backgroundTaskBlock:^{
         [_operationQueue cancelAllOperations];
-        [self openScopeIfNeeded:db andExecute:clearBlock];
+        [self inDatabaseScope:clearBlock];
     }];
-}
-
-- (void)clear {
-    [self clearFromDB:nil];
 }
 
 - (void)waitForRetry {
@@ -395,7 +413,7 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 
-- (void)resume:(NSString *)reason db:(FMDatabase *)db {
+- (void)resume:(NSString *)reason  {
     void (^resumeBlock)(FMDatabase *db) = ^(FMDatabase *db) {
         int pendingJobs = [self pendingJobs:db];
         
@@ -410,15 +428,11 @@ static NSMutableSet *_activeQueues = nil;
         _operationQueue.suspended = NO;
     };
     
-    [self openScopeIfNeeded:db andExecute:resumeBlock];
-}
-
-- (void)resume:(NSString *)reason  {
-    [self resume:reason db:nil];
+    [self inDatabaseScope:resumeBlock];
 }
 
 - (void)items:(void (^)(NSDictionary *userInfo))callback {
-    [self.dbQueue inDatabase:^(FMDatabase *db) {
+    [self inDatabaseScope:^(FMDatabase *db) {
         FMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"SELECT params FROM %@ ORDER BY taskid", TABLE_NAME]];
         
         while ([rs next]) {
@@ -477,24 +491,16 @@ static NSMutableSet *_activeQueues = nil;
     [self resetWaitingTask:taskId error:error]; // TODO run in the proper queue
 }
 
--(void)openScopeIfNeeded:(FMDatabase *)db andExecute:(void (^)(FMDatabase *db))block {
-    if (db == nil) {
-        [self.dbQueue inDatabase:block];
-    } else {
-        block(db);
-    }
-}
-
 -(void)finishTask:(task_id)taskId db:(FMDatabase *)db {
     DDLogVerbose(@"Task %llu finished", taskId);
     
     void (^deleteAndResumeBlock)(FMDatabase *db) = ^(FMDatabase *db) {
         NSString *reason = [NSString stringWithFormat:@"resume after async task %llu finished", taskId];
         [self deleteTask:taskId db:db];
-        [self resume:reason db:db];
+        [self resume:reason];
     };
     
-    [self openScopeIfNeeded:db andExecute:deleteAndResumeBlock];
+    [self inDatabaseScope:deleteAndResumeBlock];
 }
 
 -(void)finishTask:(task_id)taskId {
@@ -555,7 +561,7 @@ static NSMutableSet *_activeQueues = nil;
 }
 
 - (void)execute {
-    [self.dbQueue inDatabase:^(FMDatabase *db) {
+    [self inDatabaseScope:^(FMDatabase *db) {
         
         sqlite_uint64 taskId = 0;
         NSData *blobData;
